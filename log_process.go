@@ -1,1 +1,1 @@
-package golangproject
+package main
