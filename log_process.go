@@ -187,7 +187,7 @@ func main() {
 
 	var path, influxDBDsn string
 
-	// 动态传入参数
+	// 动态传入参数，例如在命令行运行时敲出下面的参数
 	// go run log_process.go -path ./access.log -influxDBDsn http://127.0.0.1:8086@user@password@dbname%s
 	flag.StringVar(&path, "path", "./access.log", "read file path")
 	flag.StringVar(&influxDBDsn, "influxDBDsn", "http://127.0.0.1:8086@junoba@bjtungirc@log_process@s",
