@@ -2,11 +2,13 @@ package main
 
 import (
 	"bufio"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"github.com/influxdata/influxdb1-client/v2"
 	"io"
 	"log"
+	"net/http"
 	"net/url"
 	"os"
 	"regexp"
@@ -50,6 +52,70 @@ type Message struct {
 	UpstreamTime, RequestTime    float64
 }
 
+// 系统监控状态
+type SystemInfo struct {
+	HandleLine   int     `json:"handleLine"`   // 总处理日志行数
+	Tps          float64 `json:"tps"`          // 系统吞出量
+	ReadChanLen  int     `json:"readChanLen"`  // read channel 长度
+	WriteChanLen int     `json:"writeChanLen"` // write channel 长度
+	RunTime      string  `json:"runTime"`      // 运行总时间
+	ErrNum       int     `json:"errNum"`       // 错误数
+}
+
+const (
+	TypeHandleLine = 0
+	TypeErrNum     = 1
+)
+
+var TypeMonitorChan = make(chan int, 200)
+
+type Monitor struct {
+	startTime time.Time
+	data      SystemInfo
+	tpsSli    []int
+}
+
+func (m *Monitor) start(lp *LogProcess) {
+
+	// 起一个协程来处理处理行数和错误数
+	go func() {
+		for n := range TypeMonitorChan {
+			switch n {
+			case TypeErrNum:
+				m.data.ErrNum += 1
+			case TypeHandleLine:
+				m.data.HandleLine += 1
+			}
+		}
+	}()
+
+	ticker := time.NewTicker(time.Second * 5)
+	go func() {
+		for {
+			<-ticker.C
+			m.tpsSli = append(m.tpsSli, m.data.HandleLine)
+			if len(m.tpsSli) > 2 {
+				m.tpsSli = m.tpsSli[1:]
+			}
+		}
+	}()
+
+	http.HandleFunc("/monitor", func(writer http.ResponseWriter, request *http.Request) {
+		m.data.RunTime = time.Now().Sub(m.startTime).String()
+		m.data.ReadChanLen = len(lp.rc)
+		m.data.WriteChanLen = len(lp.wc)
+
+		if len(m.tpsSli) >= 2 {
+			m.data.Tps = float64(m.tpsSli[1]-m.tpsSli[0]) / 5
+		}
+
+		ret, _ := json.MarshalIndent(m.data, "", "\t")
+
+		io.WriteString(writer, string(ret))
+	})
+	http.ListenAndServe(":9193", nil)
+}
+
 // ReadFromFile 结构体实现了 Reader 接口
 func (r *ReadFromFile) Read(rc chan []byte) {
 	// 读取模块
@@ -70,6 +136,9 @@ func (r *ReadFromFile) Read(rc chan []byte) {
 		} else if err != nil {
 			panic(fmt.Sprintf("ReadBytes error:%s", err.Error()))
 		}
+
+		TypeMonitorChan <- TypeHandleLine
+
 		// 3.将读取到的文件内容写入到rc里面
 		rc <- line[:len(line)-1]
 	}
@@ -138,6 +207,7 @@ func (l *LogProcess) Process() {
 	for v := range l.rc {
 		ret := r.FindStringSubmatch(string(v)) // 返回正则表达式括号里面匹配到的内容，一共14个括号
 		if len(ret) != 14 {
+			TypeMonitorChan <- TypeErrNum
 			log.Println("FindStringSubmatch fail:", string(v))
 			continue
 		}
@@ -146,7 +216,9 @@ func (l *LogProcess) Process() {
 		message := &Message{}
 		t, err := time.ParseInLocation("02/Jan/2006:15:04:05 +0000", ret[4], loc)
 		if err != nil {
+			TypeMonitorChan <- TypeErrNum
 			log.Println("ParseInLocation fail:", err.Error(), ret[4])
+			continue
 		}
 
 		// 时间字段转换完毕
@@ -159,6 +231,7 @@ func (l *LogProcess) Process() {
 		// Path: "GET /foo?query=t HTTP/1.0"
 		reqSli := strings.Split(ret[6], " ") // 按照空格进行切割
 		if len(reqSli) != 3 {
+			TypeMonitorChan <- TypeErrNum
 			log.Println("strings.Split fail:", ret[6])
 			continue
 		}
@@ -166,6 +239,7 @@ func (l *LogProcess) Process() {
 
 		u, err := url.Parse(reqSli[1])
 		if err != nil {
+			TypeMonitorChan <- TypeErrNum
 			log.Println("url parse fail:", err)
 			continue
 		}
@@ -213,5 +287,9 @@ func main() {
 	go lp.Process()
 	go lp.write.Write(lp.wc)
 
-	time.Sleep(30 * time.Second) // 为了不让创建完协程就退出，使其等待一秒钟保证三个协程执行完毕  打印：MESSAGE
+	m := &Monitor{
+		startTime: time.Now(),
+		data:      SystemInfo{},
+	}
+	m.start(lp)
 }
