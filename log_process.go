@@ -277,15 +277,20 @@ func main() {
 	}
 
 	lp := &LogProcess{
-		rc:    make(chan []byte),   // 初始化 channel
-		wc:    make(chan *Message), // 初始化 channel
+		rc:    make(chan []byte, 200),   // 初始化 channel,给channel添加缓存
+		wc:    make(chan *Message, 200), // 初始化 channel,给channel添加缓存
 		read:  r,
 		write: w,
 	}
 
 	go lp.read.Read(lp.rc) // 实际上应该写成这样：(*lp).ReadFromFile() 但是 golang 已经优化了
-	go lp.Process()
-	go lp.write.Write(lp.wc)
+	for i := 0; i < 2; i++ {
+		go lp.Process()
+	}
+	for i := 0; i < 4; i++ {
+		go lp.write.Write(lp.wc)
+	}
+	// 解析模块慢于读取模块，写入模块慢于解析模块，因此可以多开几个协程去并发执行相对较慢的模块
 
 	m := &Monitor{
 		startTime: time.Now(),
