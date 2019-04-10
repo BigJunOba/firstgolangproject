@@ -2,7 +2,9 @@ package main
 
 import (
 	"bufio"
+	"flag"
 	"fmt"
+	"github.com/influxdata/influxdb1-client/v2"
 	"io"
 	"log"
 	"net/url"
@@ -11,7 +13,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	// "github.com/influxdata/influxdb1-client/v2"
 )
 
 // 使用接口做一个抽象，使读取模块实现接口来实现
@@ -76,8 +77,48 @@ func (r *ReadFromFile) Read(rc chan []byte) {
 
 func (w *WriteToInfluxDB) Write(wc chan *Message) {
 	// 写入模块
+
 	for v := range wc {
-		fmt.Println(v)
+		// 解析 influxDBDsn: "http://127.0.0.1:8086@user@password@dbname%s"
+		infSli := strings.Split(w.influxDBDsn, "@")
+
+		// Make client
+		c, err := client.NewHTTPClient(client.HTTPConfig{
+			Addr:     infSli[0],
+			Username: infSli[1],
+			Password: infSli[2],
+		})
+		if err != nil {
+			fmt.Println("Error creating InfluxDB Client: ", err.Error())
+		}
+
+		// Create a new point batch
+		bp, _ := client.NewBatchPoints(client.BatchPointsConfig{
+			Database:  infSli[3],
+			Precision: infSli[4],
+		})
+
+		// Create a point and add to batch
+		// Tags: Path, Method, Scheme, Status
+		tags := map[string]string{"Path": v.Path, "Method": v.Method, "Scheme": v.Scheme, "Status": v.Status}
+		fields := map[string]interface{}{
+			"UpstremTime": v.UpstreamTime,
+			"RequestTime": v.RequestTime,
+			"BytesSent":   v.BytesSent,
+		}
+
+		pt, err := client.NewPoint("nginx_log", tags, fields, v.TimeLocal)
+		if err != nil {
+			fmt.Println("Error: ", err.Error())
+		}
+		bp.AddPoint(pt)
+
+		// Write the batch
+		if err := c.Write(bp); err != nil {
+			log.Fatal(err)
+		}
+
+		log.Println("write success!")
 	}
 }
 
@@ -143,12 +184,22 @@ func (l *LogProcess) Process() {
 }
 
 func main() {
+
+	var path, influxDBDsn string
+
+	// 动态传入参数
+	// go run log_process.go -path ./access.log -influxDBDsn http://127.0.0.1:8086@user@password@dbname%s
+	flag.StringVar(&path, "path", "./access.log", "read file path")
+	flag.StringVar(&influxDBDsn, "influxDBDsn", "http://127.0.0.1:8086@junoba@bjtungirc@log_process@s",
+		"influxdb data source")
+	flag.Parse()
+
 	r := &ReadFromFile{
-		path: "./access.log", // 当前路径下
+		path: path, // 当前路径下
 	}
 
 	w := &WriteToInfluxDB{
-		influxDBDsn: "username&password",
+		influxDBDsn: influxDBDsn,
 	}
 
 	lp := &LogProcess{
